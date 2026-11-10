@@ -206,7 +206,14 @@ def _write_bundles(bundles: list[str], profile: str | None = None) -> None:
 def _install_bundle_thread(path: str, profile: str) -> None:
     dsh = shutil.which("dsh") or "/usr/local/bin/dsh"
     env = os.environ.copy()
-    env["PATH"] = os.pathsep.join(["/usr/local/bin", "/opt/homebrew/bin", env.get("PATH", "")])
+    env["PATH"] = os.pathsep.join(
+        [
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            os.path.expanduser("~/Library/pnpm/bin"),
+            env.get("PATH", ""),
+        ]
+    )
     try:
         proc = subprocess.run(
             [dsh, "plugin", "--profile", profile, "add", f"file:{path}"],
