@@ -1,5 +1,7 @@
 # DSH Chat · 在 Blender 里和 DSH 对话
 
+[github.com/Toobe53/blender-dsh-chat](https://github.com/Toobe53/blender-dsh-chat) · MIT
+
 ![面板](panel.png)
 
 3D 视图侧栏（**Item / 条目**页）里的聊天面板。DSH 的每个操作都跑在**你现在开着的这个 Blender 会话**里——
@@ -104,7 +106,7 @@ DSH 的审批模型是 **沙箱 + 升级时询问**，不是“每个工具都�
 - [x] 会话列表（多会话切换）
 - [ ] 插件管理（列表 / 开关 / 本地安装）
 - [ ] 费用（DeepSeek 账户余额/用量）
-- [ ] GitHub 开源（Toobe53/blender-dsh-chat）
+- [x] GitHub 开源（Toobe53/blender-dsh-chat）
 
 ## 文件
 
