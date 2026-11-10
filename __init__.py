@@ -12,7 +12,7 @@ Install: copy this folder into Blender's `scripts/addons/`, enable "DSH Chat".
 bl_info = {
     "name": "DSH Chat",
     "author": "DeepSeek Harness",
-    "version": (0, 5, 0),
+    "version": (0, 6, 0),
     "blender": (5, 1, 0),
     "location": "3D Viewport > Sidebar > Item > DSH 对话",
     "description": "Chat with a DeepSeek Harness agent that can drive this Blender session",
@@ -25,6 +25,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import urllib.request
 
 import blf
 import bpy
@@ -49,6 +50,9 @@ STATE = {
     "permission": None,
     "sessions": [],
     "bundles": [],
+    "balance": "",
+    "balance_start": "",
+    "balance_spent": "",
 }
 
 MAX_ITEMS = 300
@@ -226,6 +230,49 @@ def _install_bundle_thread(path: str, profile: str) -> None:
         EVENTS.put(("error", f"安装失败：{exc}"))
 
 
+def _account_token() -> str | None:
+    path = os.path.join(_dsh_home(), ".credentials.yaml")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return None
+    in_block = False
+    block_indent = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("deepseek-account-platform/default:"):
+            in_block = True
+            block_indent = indent
+            continue
+        if in_block:
+            if indent <= block_indent:
+                break
+            if stripped.startswith("token:"):
+                return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def _balance_thread(token: str) -> None:
+    try:
+        request = urllib.request.Request(
+            "https://api.deepseek.com/user/balance",
+            headers={"x-dsh-auth-token": token, "User-Agent": "dsh-blender-chat"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        infos = data.get("balance_infos") or []
+        text = " · ".join(
+            f"{item.get('currency', '?')} {item.get('total_balance', '?')}" for item in infos
+        )
+        EVENTS.put(("balance", text or "无余额信息"))
+    except Exception as exc:  # noqa: BLE001
+        EVENTS.put(("balance_error", str(exc)))
+
+
 def _prefs(context):
     package = (__package__ or "blender_dsh_chat").split(".")[-1]
     addon = context.preferences.addons.get(package)
@@ -293,6 +340,9 @@ def _pump() -> float:
             STATE["session"] = event[1]
             STATE["status"] = "已连接"
             STATE["bundles"] = _read_bundles()
+            token = _account_token()
+            if token:
+                threading.Thread(target=_balance_thread, args=(token,), daemon=True).start()
             pending = STATE["pending"]
             STATE["pending"] = None
             if pending and STATE["client"]:
@@ -321,6 +371,22 @@ def _pump() -> float:
         elif kind == "plugins_changed":
             STATE["bundles"] = _read_bundles()
             _append("system", str(event[1]))
+        elif kind == "balance":
+            text = str(event[1])
+            STATE["balance"] = text
+            try:
+                currency, amount = text.split(" ", 1)
+                amount = float(amount.replace(",", ""))
+                start_currency, start_amount = STATE["balance_start"].split(" ", 1)
+                if start_currency != currency:
+                    raise ValueError
+                spent = float(start_amount) - amount
+                STATE["balance_spent"] = f"{currency} {spent:.2f}" if spent >= 0 else ""
+            except (ValueError, TypeError):
+                STATE["balance_start"] = text
+                STATE["balance_spent"] = ""
+        elif kind == "balance_error":
+            _append("system", f"余额查询失败：{event[1]}")
         elif kind == "sessions":
             STATE["sessions"] = list(event[1] or [])
         elif kind == "permission":
@@ -330,6 +396,9 @@ def _pump() -> float:
             STATE["busy"] = False
             STATE["assistant_open"] = False
             STATE["permission"] = None
+            token = _account_token()
+            if token:
+                threading.Thread(target=_balance_thread, args=(token,), daemon=True).start()
         elif kind == "resumed":
             sid = event[1] or ""
             STATE["ready"] = bool(sid)
@@ -521,6 +590,19 @@ class DSH_OT_permission(Operator):
         STATE["permission"] = None
         STATE["status"] = "已连接" if STATE["ready"] else STATE["status"]
         _redraw()
+        return {"FINISHED"}
+
+
+class DSH_OT_refresh_balance(Operator):
+    bl_idname = "dsh.refresh_balance"
+    bl_label = "刷新余额"
+
+    def execute(self, context):
+        token = _account_token()
+        if not token:
+            self.report({"WARNING"}, "没找到 DeepSeek 账户 token")
+            return {"CANCELLED"}
+        threading.Thread(target=_balance_thread, args=(token,), daemon=True).start()
         return {"FINISHED"}
 
 
@@ -720,6 +802,10 @@ class DSH_PT_chat(Panel):
             col.label(text=f"会话 {STATE['session'][:8]}")
         if STATE["usage"]:
             col.label(text=f"上下文 {STATE['usage']}")
+        if STATE["balance"]:
+            col.operator("dsh.refresh_balance", text=f"余额 {STATE['balance']}", icon="FILE_REFRESH")
+        if STATE["balance_spent"]:
+            col.label(text=f"本次会话约 {STATE['balance_spent']}")
         if STATE["busy"]:
             col.label(text="思考中…", icon="SORTTIME")
 
@@ -792,6 +878,7 @@ CLASSES = (
     DSH_OT_new_session,
     DSH_OT_resume,
     DSH_OT_resume_id,
+    DSH_OT_refresh_balance,
     DSH_OT_toggle_bundle,
     DSH_OT_install_bundle,
     DSH_MT_sessions,
