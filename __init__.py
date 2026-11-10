@@ -12,7 +12,7 @@ Install: copy this folder into Blender's `scripts/addons/`, enable "DSH Chat".
 bl_info = {
     "name": "DSH Chat",
     "author": "DeepSeek Harness",
-    "version": (0, 4, 0),
+    "version": (0, 5, 0),
     "blender": (5, 1, 0),
     "location": "3D Viewport > Sidebar > Item > DSH 对话",
     "description": "Chat with a DeepSeek Harness agent that can drive this Blender session",
@@ -23,6 +23,7 @@ import json
 import os
 import queue
 import shutil
+import subprocess
 import threading
 
 import blf
@@ -47,9 +48,11 @@ STATE = {
     "configs": {},
     "permission": None,
     "sessions": [],
+    "bundles": [],
 }
 
 MAX_ITEMS = 300
+CORE_BUNDLES = ("@deepseek-ai/dsh-base", "@deepseek-ai/dsh-acp-app")
 TIMER_INTERVAL = 0.15
 
 
@@ -170,6 +173,59 @@ def _ensure_profile(profile: str) -> str:
     return path
 
 
+def _profile_path(profile: str | None = None) -> str:
+    if not profile:
+        prefs = _prefs(bpy.context)
+        profile = (prefs.profile if prefs and prefs.profile else "blender")
+    return os.path.join(_dsh_home(), "profiles", profile, "package.json")
+
+
+def _read_bundles(profile: str | None = None) -> list[str]:
+    try:
+        with open(_profile_path(profile), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return list(data["dsh"]["profile"]["bundles"])
+    except Exception:
+        return []
+
+
+def _write_bundles(bundles: list[str], profile: str | None = None) -> None:
+    path = _profile_path(profile)
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    data.setdefault("dsh", {}).setdefault("profile", {})["bundles"] = bundles
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+    STATE["bundles"] = bundles
+
+
+def _install_bundle_thread(path: str, profile: str) -> None:
+    dsh = shutil.which("dsh") or "/usr/local/bin/dsh"
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join(["/usr/local/bin", "/opt/homebrew/bin", env.get("PATH", "")])
+    try:
+        proc = subprocess.run(
+            [dsh, "plugin", "--profile", profile, "add", f"file:{path}"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout)[-500:])
+        with open(os.path.join(path, "package.json"), "r", encoding="utf-8") as handle:
+            name = json.load(handle).get("name")
+        if not name:
+            raise RuntimeError("package.json has no name")
+        bundles = _read_bundles(profile)
+        if name not in bundles:
+            bundles.append(name)
+            _write_bundles(bundles, profile)
+        EVENTS.put(("plugins_changed", f"已安装 {name}，点『新会话』重连后生效"))
+    except Exception as exc:  # noqa: BLE001
+        EVENTS.put(("error", f"安装失败：{exc}"))
+
+
 def _prefs(context):
     package = (__package__ or "blender_dsh_chat").split(".")[-1]
     addon = context.preferences.addons.get(package)
@@ -236,6 +292,7 @@ def _pump() -> float:
             STATE["ready"] = True
             STATE["session"] = event[1]
             STATE["status"] = "已连接"
+            STATE["bundles"] = _read_bundles()
             pending = STATE["pending"]
             STATE["pending"] = None
             if pending and STATE["client"]:
@@ -261,6 +318,9 @@ def _pump() -> float:
         elif kind == "usage":
             used, size = event[1], event[2]
             STATE["usage"] = f"{used / 1000:.1f}k / {size / 1000:.0f}k"
+        elif kind == "plugins_changed":
+            STATE["bundles"] = _read_bundles()
+            _append("system", str(event[1]))
         elif kind == "sessions":
             STATE["sessions"] = list(event[1] or [])
         elif kind == "permission":
@@ -464,6 +524,56 @@ class DSH_OT_permission(Operator):
         return {"FINISHED"}
 
 
+class DSH_OT_toggle_bundle(Operator):
+    bl_idname = "dsh.toggle_bundle"
+    bl_label = "开关插件"
+
+    name: StringProperty()
+
+    def execute(self, context):
+        if self.name in CORE_BUNDLES:
+            self.report({"WARNING"}, "核心 bundle 不能关闭")
+            return {"CANCELLED"}
+        bundles = _read_bundles()
+        if self.name in bundles:
+            bundles.remove(self.name)
+            action = "已停用"
+        else:
+            bundles.append(self.name)
+            action = "已启用"
+        try:
+            _write_bundles(bundles)
+        except Exception as exc:  # noqa: BLE001
+            self.report({"ERROR"}, f"写入 profile 失败：{exc}")
+            return {"CANCELLED"}
+        _append("system", f"{action} {self.name}，点『新会话』重连后生效")
+        return {"FINISHED"}
+
+
+class DSH_OT_install_bundle(Operator):
+    bl_idname = "dsh.install_bundle"
+    bl_label = "安装本地 Bundle"
+
+    path: StringProperty(subtype="DIR_PATH")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+    def draw(self, context):
+        self.layout.prop(self, "path")
+
+    def execute(self, context):
+        path = (self.path or "").strip()
+        if not os.path.isdir(path):
+            self.report({"ERROR"}, "选一个含 package.json 的目录")
+            return {"CANCELLED"}
+        prefs = _prefs(context)
+        profile = prefs.profile if prefs and prefs.profile else "blender"
+        threading.Thread(target=_install_bundle_thread, args=(path, profile), daemon=True).start()
+        _append("system", f"正在安装 {os.path.basename(path)}…")
+        return {"FINISHED"}
+
+
 class DSH_OT_copy(Operator):
     bl_idname = "dsh.copy"
     bl_label = "复制记录"
@@ -525,6 +635,24 @@ class DSH_MT_effort(Menu):
 
 # ---------------------------------------------------------------------------
 # panel
+
+
+class DSH_MT_plugins(Menu):
+    bl_idname = "DSH_MT_plugins"
+    bl_label = "插件"
+
+    def draw(self, context):
+        bundles = STATE.get("bundles") or _read_bundles()
+        if not bundles:
+            self.layout.label(text="未读取到 profile")
+        for name in bundles:
+            self.layout.operator(
+                "dsh.toggle_bundle",
+                text=name,
+                icon="CHECKMARK",
+            ).name = name
+        self.layout.separator()
+        self.layout.operator("dsh.install_bundle", text="安装本地 Bundle…", icon="IMPORT")
 
 
 class DSH_MT_sessions(Menu):
@@ -621,6 +749,7 @@ class DSH_PT_chat(Panel):
                 "DSH_MT_sessions",
                 text=f"会话  {STATE['session'][:8] if STATE['session'] else '新会话'}",
             )
+            layout.menu("DSH_MT_plugins", text=f"插件  {len(STATE['bundles'])} 个")
 
         max_width = max(80.0, (context.region.width - 28.0) * 0.82)
         lines = []
@@ -663,7 +792,10 @@ CLASSES = (
     DSH_OT_new_session,
     DSH_OT_resume,
     DSH_OT_resume_id,
+    DSH_OT_toggle_bundle,
+    DSH_OT_install_bundle,
     DSH_MT_sessions,
+    DSH_MT_plugins,
     DSH_OT_set_model,
     DSH_OT_set_effort,
     DSH_OT_copy,
