@@ -1,5 +1,8 @@
 # DSH Chat for Blender
 
+[![version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/Toobe53/blender-dsh-chat/releases)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Chat with a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) agent
 inside Blender. The agent runs through ACP (Agent Client Protocol) over stdio and
 drives **this** Blender session through the official Blender MCP add-on — you watch
@@ -16,6 +19,8 @@ the viewport while you talk.
 - Session list and resume
 - Portable: preferences for `dsh`, profile, python, working directory; bundled MCP
   bridge; auto-creates the ACP profile on first connect
+- Uses Blender's bundled Python (no system `python3` needed)
+- Dependency self-check (dsh / node / python / MCP add-on / port / profile)
 
 ## Requirements
 
@@ -27,14 +32,11 @@ the viewport while you talk.
 
 ## Install
 
-Copy this folder into Blender's `scripts/addons/` directory, then enable
-**DSH Chat** in Preferences → Add-ons.
+Download `blender_dsh_chat-1.0.0.zip` from the release page, then
+Preferences → Add-ons → **Install…** → select the zip → enable **DSH Chat**.
 
-```bash
-# macOS
-cp -R blender_dsh_chat \
-  "$HOME/Library/Application Support/Blender/5.2/scripts/addons/"
-```
+Manual fallback: copy the `blender_dsh_chat/` folder into Blender's
+`scripts/addons/` directory.
 
 The first connection creates `~/.dsh/profiles/blender/package.json`
 (`dsh-base` + `dsh-acp-app`) if missing.

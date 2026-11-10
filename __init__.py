@@ -12,7 +12,7 @@ Install: copy this folder into Blender's `scripts/addons/`, enable "DSH Chat".
 bl_info = {
     "name": "DSH Chat",
     "author": "DeepSeek Harness",
-    "version": (0, 6, 0),
+    "version": (1, 0, 0),
     "blender": (5, 1, 0),
     "location": "3D Viewport > Sidebar > Item > DSH 对话",
     "description": "Chat with a DeepSeek Harness agent that can drive this Blender session",
@@ -23,7 +23,9 @@ import json
 import os
 import queue
 import shutil
+import socket
 import subprocess
+import sys
 import threading
 import urllib.request
 
@@ -286,6 +288,15 @@ def _prefs(context):
     return addon.preferences if addon else None
 
 
+def _python_bin(prefs=None) -> str:
+    """Prefer the Python bundled with Blender, so no system python3 is needed."""
+    if prefs is not None and getattr(prefs, "python_bin", ""):
+        return prefs.python_bin
+    if "python" in os.path.basename(sys.executable).lower():
+        return sys.executable
+    return shutil.which("python3") or "/usr/bin/python3"
+
+
 def _default_cwd(context=None) -> str:
     prefs = _prefs(context or bpy.context)
     if prefs and prefs.project_root and os.path.isdir(prefs.project_root):
@@ -304,7 +315,7 @@ def _start_client() -> None:
         _ensure_profile(profile)
     except OSError:
         pass
-    python = (prefs.python_bin if prefs and prefs.python_bin else "") or shutil.which("python3") or "/usr/bin/python3"
+    python = _python_bin(prefs)
     bridge = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blender_mcp_bridge.py")
     servers = [{"name": "blender", "command": python, "args": [bridge], "env": []}]
     client = acp_client.ACPClient(
@@ -332,6 +343,14 @@ def _apply_config(config_id: str, value: str) -> None:
 
 
 def _pump() -> float:
+    try:
+        return _pump_impl()
+    except Exception as exc:  # noqa: BLE001 - a timer must never die
+        print(f"[DSH Chat] timer error: {exc}")
+        return TIMER_INTERVAL
+
+
+def _pump_impl() -> float:
     changed = False
     while True:
         try:
@@ -663,6 +682,61 @@ class DSH_OT_install_bundle(Operator):
         return {"FINISHED"}
 
 
+def _dependency_report() -> list[tuple[str, bool, str]]:
+    try:
+        dsh = acp_client._dsh_binary()
+    except Exception:
+        dsh = None
+    node = shutil.which("node") or next(
+        (path for path in ("/usr/local/bin/node", "/opt/homebrew/bin/node") if os.path.exists(path)),
+        None,
+    )
+    prefs = _prefs(bpy.context)
+    python = _python_bin(prefs)
+    bridge = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blender_mcp_bridge.py")
+    profile = _profile_path()
+    mcp_enabled = "bl_ext.user_default.mcp" in [
+        addon.module for addon in bpy.context.preferences.addons
+    ]
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(0.4)
+    try:
+        port_ok = probe.connect_ex(("127.0.0.1", 9876)) == 0
+    except OSError:
+        port_ok = False
+    finally:
+        probe.close()
+
+    return [
+        ("dsh", bool(dsh), dsh or "未找到（安装 DeepSeek Harness 或加入 PATH）"),
+        ("node", bool(node), node or "未找到（dsh 需要 node）"),
+        ("python", os.path.exists(python), python),
+        ("MCP bridge", os.path.exists(bridge), bridge),
+        ("ACP profile", os.path.exists(profile), profile),
+        ("MCP add-on", mcp_enabled, "已启用" if mcp_enabled else "未启用（Blender 官方 MCP 插件）"),
+        ("port 9876", port_ok, "监听中" if port_ok else "无监听，先启用官方 MCP 插件"),
+    ]
+
+
+class DSH_OT_check_deps(Operator):
+    bl_idname = "dsh.check_deps"
+    bl_label = "检查依赖"
+    bl_description = "检查 dsh / node / python / MCP 插件 / 端口 / profile"
+
+    def execute(self, context):
+        report = _dependency_report()
+        lines = [("✓ " if ok else "✗ ") + f"{name}: {detail}" for name, ok, detail in report]
+        text = "\n".join(lines)
+        block = bpy.data.texts.get("DSH 依赖检查") or bpy.data.texts.new("DSH 依赖检查")
+        block.clear()
+        block.write(text)
+        for line in lines:
+            _append("system", line)
+        missing = [name for name, ok, _detail in report if not ok]
+        self.report({"INFO" if not missing else "WARNING"}, text)
+        return {"FINISHED"}
+
+
 class DSH_OT_copy(Operator):
     bl_idname = "dsh.copy"
     bl_label = "复制记录"
@@ -787,9 +861,10 @@ class DSHChatPreferences(bpy.types.AddonPreferences):
         layout.separator()
         info = layout.column(align=True)
         info.label(text=f"dsh: {shutil.which('dsh') or '未找到'}")
-        info.label(text=f"python3: {shutil.which('python3') or '未找到'}")
+        info.label(text=f"python: {_python_bin(self)}")
         profile_path = os.path.join(_dsh_home(), "profiles", self.profile, "package.json")
         info.label(text=f"profile: {'已存在' if os.path.exists(profile_path) else '首次连接时自动创建'}")
+        layout.operator("dsh.check_deps", icon="CHECKMARK")
 
 
 class DSH_PT_chat(Panel):
@@ -885,6 +960,7 @@ CLASSES = (
     DSH_OT_new_session,
     DSH_OT_resume,
     DSH_OT_resume_id,
+    DSH_OT_check_deps,
     DSH_OT_refresh_balance,
     DSH_OT_toggle_bundle,
     DSH_OT_install_bundle,
